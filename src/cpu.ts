@@ -1,9 +1,5 @@
 
-// Copyright (c) 4Sight http://github.com/4s1ght (24.02.2023)
-
-import EventEmitter from "events";
-import os from "os"
-
+import os from 'os'
 
 interface CPUValues {
     /** Represents total CPU core usage. */
@@ -14,85 +10,101 @@ interface CPUValues {
     user: number
     /** Represents CPU usage caused by system interrupts. */
     irq: number
+    /** Represents CPU usage caused by low priority processes. */
+    nice: number
 }
 
 interface CPUUsage extends CPUValues {
     /** Represents per-core CPU usage. */
-    cores: CPUValues[];
-}
-
-type CPUEventCallback = (data: CPUUsage) => any
-
-
-export default class CPUMonitor extends EventEmitter {
-
-    public declare on: (event: "data", listener: CPUEventCallback) => this
-    
-    private timer?: NodeJS.Timer;
-    private lastUsage: os.CpuInfo[] = [];
-
-    constructor() {
-        super()
-    }
-
+    cores: CPUValues[],
     /** 
-     * Starts monitoring the CPU and reporting the readouts through a `data` event.
-     * Correct values are calculated starting from the second readout.  
-     * The frequency of readouts defaults to 1 second.
+     * Represents CPU usage of this NodeJS process. The value can differ 
+     * from the actual ones as NodeJS can offload async tasks to separate threads. 
+     * */
+    process: {
+        system: number
+        user: number
+    }
+}
+
+class CPU {
+
+    private constructor() {}
+    public static getInstance = () => new this()
+
+    private lastCall = 0
+    private lastGlobalUsage: os.CpuInfo[] = []
+    private lastProcessUsage: NodeJS.CpuUsage = { user: 0, system: 0 }
+
+    // Gets per-thread usage values
+    private getCoreUsage(cpuN: os.CpuInfo, cpuO: os.CpuInfo, interval: number) {
+        const tN = cpuN.times, tO = cpuO.times;
+        const totalN = tN.user + tN.nice + tN.sys + tN.irq + tN.nice
+        const totalO = tO.user + tO.nice + tO.sys + tO.irq + tO.nice
+
+        return {
+            total: (totalN - totalO)    / interval * 100,
+            sys:   (tN.sys - tO.sys)    / interval * 100,
+            user:  (tN.user - tO.user)  / interval * 100,
+            irq:   (tN.irq - tO.irq)    / interval * 100,
+            nice:  (tN.nice - tO.nice)  / interval * 100
+        }
+    }
+
+    /**
+     * Process CPU usage is represented in microsecond, unlike the global usage in milliseconds.
      */
-    public start(intervals: number = 1000) {
-        this.timer = setInterval(this.tick(this, intervals), intervals);
-        return this;
+    private getprocessCpuUsage(cpuN: NodeJS.CpuUsage, cpuO: NodeJS.CpuUsage, interval: number): NodeJS.CpuUsage {
+        return {
+            system: (cpuN.system - cpuO.system) / (interval * 1000) * 100,
+            user:   (cpuN.user   - cpuO.user)   / (interval * 1000) * 100
+        }
     }
 
-    /** Stops monitoring CPU usage. */
-    public stop() {
-        clearInterval(this.timer);
-        return this;
-    }
+    public getUsage() {
 
-    private tick(self: CPUMonitor, intervals: number) {
-        
-        // Get the usage values per CPU thread
-        function getCoreUsage(cpuN: os.CpuInfo, cpuO: os.CpuInfo) {
-            const tN = cpuN.times, tO = cpuO.times;
-            const totalN = tN.user + tN.nice + tN.sys + tN.irq;
-            const totalO = tO.user + tO.nice + tO.sys + tO.irq;
+        const now = Date.now()
+        const interval = now - this.lastCall
+        const cpuNewGlobal = os.cpus()
+        const cpuNewProcess = process.cpuUsage()
 
-            return {
-                total: (totalN - totalO)   / intervals * 100,
-                sys:   (tN.sys - tO.sys)   / intervals * 100,
-                user:  (tN.user - tO.user) / intervals * 100,
-                irq:   (tN.irq - tO.irq)   / intervals * 100
-            }
+        let $global = { 
+            total: 0, 
+            sys: 0, 
+            user: 0, 
+            irq: 0, 
+            nice: 0 
         }
 
-        return () => {
+        const cores = this.lastGlobalUsage.map((cpuOld, i) => {
+            const core = this.getCoreUsage(cpuNewGlobal[i], cpuOld, interval)
+            $global.total += core.total
+            $global.sys   += core.sys
+            $global.user  += core.user
+            $global.irq   += core.irq
+            $global.nice  += core.nice
+            return core;
+        });
 
-            const cpuNew = os.cpus();
 
-            let whole = { total: 0, sys: 0, user: 0, irq: 0 }
-            
-            const cores = self.lastUsage.map((cpuOld, i) => {
-                const core = getCoreUsage(cpuNew[i], cpuOld);
-                whole.total += core.total;
-                whole.sys   += core.sys;
-                whole.user  += core.user;
-                whole.irq   += core.irq;
-                return core;
-            });
-
-            const data: CPUUsage = { 
-                total:  whole.total / cores.length,
-                sys:    whole.sys   / cores.length,
-                user:   whole.user  / cores.length,
-                irq:    whole.irq   / cores.length,
-                cores 
-            }
-
-            self.lastUsage = cpuNew;
-            self.emit('data', data);
+        const data: CPUUsage = { 
+            total:  $global.total / cores.length,
+            sys:    $global.sys   / cores.length,
+            user:   $global.user  / cores.length,
+            irq:    $global.irq   / cores.length,
+            nice:   $global.nice  / cores.length,
+            process: this.getprocessCpuUsage(cpuNewProcess, this.lastProcessUsage, interval),
+            cores
         }
+
+        this.lastGlobalUsage = cpuNewGlobal
+        this.lastProcessUsage = cpuNewProcess
+        this.lastCall = now
+
+        return data
+
     }
 
 }
+
+export default CPU.getInstance
